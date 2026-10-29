@@ -1,14 +1,35 @@
+
 from typing import Any
 from pathlib import Path
+import logging
+import sys
+import time
+import uuid
 
 import joblib
 import pandas as pd
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)],
+    force=True,
+)
+
+logger = logging.getLogger("bank-churn-api")
 
 
 MODEL_NAME = "BankChurnLab4Model"
-MODEL_PATH = Path(__file__).resolve().parent / "models" / "bank_churn_lab4_model.pkl"
+MODEL_PATH = (
+    Path(__file__).resolve().parent
+    / "models"
+    / "bank_churn_lab4_model.pkl"
+)
 
 REQUIRED_FEATURES = [
     "credit_score",
@@ -31,15 +52,17 @@ model_loaded = False
 try:
     model = joblib.load(MODEL_PATH)
     model_loaded = True
-
-    print("===================================")
-    print("MODEL LOADED SUCCESSFULLY")
-    print("Model:", MODEL_NAME)
-    print("Path:", MODEL_PATH)
-    print("===================================")
-
-except Exception as e:
-    print("MODEL LOADING FAILED:", e)
+    logger.info(
+        "event=model_loaded model=%s model_path=%s",
+        MODEL_NAME,
+        MODEL_PATH.name,
+    )
+except Exception:
+    logger.exception(
+        "event=model_load_failed model=%s model_path=%s",
+        MODEL_NAME,
+        MODEL_PATH.name,
+    )
 
 
 app = FastAPI(
@@ -47,6 +70,65 @@ app = FastAPI(
     description="Bank Customer Churn Prediction using the LAB4 trained model",
     version="1.0",
 )
+
+
+@app.middleware("http")
+async def request_logging_middleware(request: Request, call_next):
+    request_id = request.headers.get("X-Request-ID", str(uuid.uuid4()))
+    start_time = time.perf_counter()
+
+    try:
+        response = await call_next(request)
+        duration_ms = (time.perf_counter() - start_time) * 1000
+
+        log_level = (
+            logging.WARNING
+            if response.status_code >= 400
+            else logging.INFO
+        )
+
+        logger.log(
+            log_level,
+            "event=http_request request_id=%s method=%s path=%s status=%s duration_ms=%.2f",
+            request_id,
+            request.method,
+            request.url.path,
+            response.status_code,
+            duration_ms,
+        )
+
+        response.headers["X-Request-ID"] = request_id
+        return response
+
+    except Exception:
+        duration_ms = (time.perf_counter() - start_time) * 1000
+
+        logger.exception(
+            "event=http_request_failed request_id=%s method=%s path=%s duration_ms=%.2f",
+            request_id,
+            request.method,
+            request.url.path,
+            duration_ms,
+        )
+        raise
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(
+    request: Request,
+    exc: RequestValidationError,
+):
+    logger.warning(
+        "event=request_validation_failed method=%s path=%s error_count=%s",
+        request.method,
+        request.url.path,
+        len(exc.errors()),
+    )
+
+    return JSONResponse(
+        status_code=422,
+        content={"detail": exc.errors()},
+    )
 
 
 @app.get("/")
@@ -61,11 +143,14 @@ def home():
 @app.get("/health")
 def health():
     if model_loaded:
+        logger.info("event=health_check status=healthy")
         return {
             "status": "healthy",
             "model_loaded": True,
             "model": MODEL_NAME,
         }
+
+    logger.error("event=health_check status=unhealthy model_loaded=false")
 
     raise HTTPException(
         status_code=503,
@@ -75,6 +160,7 @@ def health():
 
 @app.get("/features")
 def features():
+    logger.info("event=features_requested")
     return {
         "required_features": REQUIRED_FEATURES,
     }
@@ -83,6 +169,7 @@ def features():
 @app.post("/predict")
 def predict(data: dict[str, Any]):
     if not model_loaded:
+        logger.error("event=prediction_failed reason=model_not_loaded")
         raise HTTPException(
             status_code=503,
             detail="Model is not loaded",
@@ -95,6 +182,11 @@ def predict(data: dict[str, Any]):
     ]
 
     if missing:
+        logger.warning(
+            "event=prediction_validation_failed reason=missing_features missing_count=%s",
+            len(missing),
+        )
+
         raise HTTPException(
             status_code=400,
             detail={
@@ -126,10 +218,18 @@ def predict(data: dict[str, Any]):
                 probabilities[classes.index(1)]
             )
 
+        logger.info("event=prediction_succeeded")
+
         return result
 
-    except Exception as e:
+    except HTTPException:
+        raise
+
+    except Exception:
+        logger.exception("event=prediction_failed")
+
         raise HTTPException(
             status_code=500,
-            detail=f"Prediction failed: {str(e)}",
+            detail="Prediction failed due to an internal error",
         )
+
