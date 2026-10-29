@@ -1,4 +1,4 @@
-```yaml
+
 name: Build Test and Publish Bank Churn API
 
 on:
@@ -77,4 +77,4 @@ jobs:
         run: |
           docker push "$IMAGE_ID:latest"
           docker push "$IMAGE_ID:sha-${GITHUB_SHA}"
-```
+
