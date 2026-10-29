@@ -52,7 +52,7 @@ jobs:
         if: always()
         run: docker rm -f bank-churn-ci || true
 
-      - name: Create lowercase GHCR image name
+      - name: Set GHCR image name
         run: |
           IMAGE_ID="ghcr.io/${GITHUB_REPOSITORY_OWNER}/bank-churn-api"
           IMAGE_ID=$(echo "$IMAGE_ID" | tr '[:upper:]' '[:lower:]')
